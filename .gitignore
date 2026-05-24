@@ -1,0 +1,24 @@
+# Version Control Ignore Paths
+
+# Python virtual environment & caches
+backend/venv/
+backend/__pycache__/
+backend/**/*.pyc
+backend/app.db
+
+# Node.js node_modules & Next.js production builds
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+
+# Local Environment Variables & Secrets
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Operating System Files
+.DS_Store
+Thumbs.db

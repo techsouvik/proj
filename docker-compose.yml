@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  # 1. Database Service
+  db:
+    image: postgres:15-alpine
+    container_name: aether_db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: aether_telemetry
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # 2. Python FastAPI Backend (Chat & Ingestion SDK pipeline)
+  backend:
+    build: ./backend
+    container_name: aether_backend
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/aether_telemetry
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - INGEST_URL=http://localhost:8000/api/logs/ingest
+      - REDACT_PII=True
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # 3. Next.js Frontend (Chat application & metrics charts dashboard)
+  frontend:
+    build: ./frontend
+    container_name: aether_frontend
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
+    driver: local
