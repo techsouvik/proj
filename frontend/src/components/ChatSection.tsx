@@ -39,10 +39,27 @@ export default function ChatSection({ backendUrl, onLogIngested }: ChatSectionPr
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
 
+  // Retrieve or generate unique browser session ID for user-level partitioning
+  const getSessionId = (): string => {
+    if (typeof window !== "undefined") {
+      let sid = localStorage.getItem("aether_session_id");
+      if (!sid) {
+        sid = "sess_" + Math.random().toString(36).substring(2, 15);
+        localStorage.setItem("aether_session_id", sid);
+      }
+      return sid;
+    }
+    return "";
+  };
+
   // Load all conversation sessions
   const fetchConversations = async () => {
     try {
-      const res = await fetch(`${backendUrl}/api/chat/conversations`);
+      const res = await fetch(`${backendUrl}/api/chat/conversations`, {
+        headers: {
+          "X-Session-ID": getSessionId()
+        }
+      });
       if (res.ok) {
         const data = await res.json();
         setConversations(data);
@@ -61,7 +78,11 @@ export default function ChatSection({ backendUrl, onLogIngested }: ChatSectionPr
     if (activeConversationId) {
       const fetchHistory = async () => {
         try {
-          const res = await fetch(`${backendUrl}/api/chat/conversations/${activeConversationId}`);
+          const res = await fetch(`${backendUrl}/api/chat/conversations/${activeConversationId}`, {
+            headers: {
+              "X-Session-ID": getSessionId()
+            }
+          });
           if (res.ok) {
             const data = await res.json();
             setMessages(data.messages || []);
@@ -90,7 +111,10 @@ export default function ChatSection({ backendUrl, onLogIngested }: ChatSectionPr
     try {
       const res = await fetch(`${backendUrl}/api/chat/conversations`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { 
+          "Content-Type": "application/json",
+          "X-Session-ID": getSessionId()
+        },
         body: JSON.stringify({ title: "New Conversation" }),
       });
       if (res.ok) {
@@ -108,7 +132,12 @@ export default function ChatSection({ backendUrl, onLogIngested }: ChatSectionPr
     e.stopPropagation();
     if (!confirm("Are you sure you want to delete this chat session? All historical metrics will be cascade deleted.")) return;
     try {
-      const res = await fetch(`${backendUrl}/api/chat/conversations/${id}`, { method: "DELETE" });
+      const res = await fetch(`${backendUrl}/api/chat/conversations/${id}`, { 
+        method: "DELETE",
+        headers: {
+          "X-Session-ID": getSessionId()
+        }
+      });
       if (res.ok) {
         setConversations((prev) => prev.filter((c) => c.id !== id));
         if (activeConversationId === id) {
@@ -159,7 +188,10 @@ export default function ChatSection({ backendUrl, onLogIngested }: ChatSectionPr
     try {
       const response = await fetch(`${backendUrl}/api/chat/stream`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { 
+          "Content-Type": "application/json",
+          "X-Session-ID": getSessionId()
+        },
         body: JSON.stringify({
           conversation_id: activeConversationId,
           message: originalInput,
@@ -271,41 +303,43 @@ export default function ChatSection({ backendUrl, onLogIngested }: ChatSectionPr
   // Inspect message telemetry details
   const inspectTelemetry = async (messageId: string) => {
     if (!messageId || messageId.startsWith("temp-")) return;
+    setSelectedTelemetry({
+      messageId,
+      loading: true
+    });
     try {
-      const res = await fetch(`${backendUrl}/api/chat/conversations/${activeConversationId}`);
+      const res = await fetch(`${backendUrl}/api/logs/message/${messageId}`);
       if (res.ok) {
-        // Query recent telemetry log matching this message
-        const analyticsRes = await fetch(`${backendUrl}/api/analytics`);
-        if (analyticsRes.ok) {
-          const analyticsData = await analyticsRes.json();
-          // Find log matching this message ID
-          // Or let's query backend for standard log files
-          // Let's create an elegant drawer showing telemetry details
-          setSelectedTelemetry({
-            messageId,
-            loading: true
-          });
-          
-          // Let's fetch the actual logs or details
-          // To keep it simple, we can retrieve message context from general analytics list 
-          // or simulate matching the metadata
-          setTimeout(() => {
-            setSelectedTelemetry({
-              id: "LOG-" + messageId.slice(0, 8).toUpperCase(),
-              model: model,
-              provider: provider,
-              latency: model.includes("gemini") ? "1.4s" : "0.8s",
-              tokens: "128 (approx)",
-              status: "success",
-              piiFilter: "Active"
-            });
-          }, 200);
-        }
+        const log = await res.json();
+        setSelectedTelemetry({
+          id: log.id.slice(0, 8).toUpperCase(),
+          model: log.model,
+          provider: log.provider,
+          latency: log.latency_ms >= 1000 ? `${(log.latency_ms / 1000).toFixed(2)}s` : `${Math.round(log.latency_ms)}ms`,
+          tokens: `${log.total_tokens} (P: ${log.prompt_tokens} + C: ${log.completion_tokens})`,
+          status: log.status,
+          piiFilter: "Active",
+          rawInput: log.raw_input,
+          rawOutput: log.raw_output,
+          timestamp: log.timestamp
+        });
+      } else {
+        setSelectedTelemetry({
+          id: "QUEUED",
+          model: model,
+          provider: provider,
+          latency: "processing...",
+          tokens: "calculating...",
+          status: "queued",
+          piiFilter: "Active"
+        });
       }
     } catch (e) {
-      console.error(e);
+      console.error("Failed to fetch message telemetry:", e);
+      setSelectedTelemetry(null);
     }
   };
+
 
   return (
     <div className="flex h-full flex-col md:flex-row gap-6">
@@ -495,8 +529,26 @@ export default function ChatSection({ backendUrl, onLogIngested }: ChatSectionPr
                 <div className="flex justify-between"><span className="text-slate-500">Latency:</span><span className="font-medium text-emerald-400">{selectedTelemetry.latency}</span></div>
                 <div className="flex justify-between"><span className="text-slate-500">Tokens:</span><span className="font-medium text-white">{selectedTelemetry.tokens}</span></div>
                 <div className="flex justify-between"><span className="text-slate-500">Inbound PII Redaction:</span><span className="px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-400 text-[10px] font-bold">Active</span></div>
+                
+                {selectedTelemetry.rawInput && (
+                  <div className="space-y-1 pt-1.5 border-t border-white/5">
+                    <span className="text-slate-500 block">Redacted Input:</span>
+                    <div className="p-1.5 bg-black/40 rounded border border-white/5 font-mono text-[10px] max-h-16 overflow-y-auto break-all whitespace-pre-wrap text-slate-400">
+                      {selectedTelemetry.rawInput}
+                    </div>
+                  </div>
+                )}
+                {selectedTelemetry.rawOutput && (
+                  <div className="space-y-1">
+                    <span className="text-slate-500 block">Redacted Output:</span>
+                    <div className="p-1.5 bg-black/40 rounded border border-white/5 font-mono text-[10px] max-h-16 overflow-y-auto break-all whitespace-pre-wrap text-slate-400">
+                      {selectedTelemetry.rawOutput}
+                    </div>
+                  </div>
+                )}
+
                 <p className="text-[10px] text-slate-500 leading-relaxed pt-2 border-t border-white/5">
-                  Input and output content previews are redacted locally before DB insertion. View aggregate latency speeds on the Dashboard tab.
+                  Previews show the exact masked records written to the database. View aggregated statistics in the Dashboard.
                 </p>
               </div>
             )}

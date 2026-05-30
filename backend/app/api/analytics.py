@@ -1,4 +1,5 @@
 import logging
+import json
 from collections import defaultdict
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends
@@ -6,6 +7,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app import models
+from app.api.ingest import redis_conn
 
 logger = logging.getLogger("AnalyticsAPI")
 logger.setLevel(logging.INFO)
@@ -18,6 +20,16 @@ def get_metrics(db: Session = Depends(get_db)):
     Computes real-time telemetry metrics and returns structured payload
     to drive the SVG dashboard visuals in the frontend.
     """
+    cache_key = "aether_analytics_metrics"
+    if redis_conn is not None:
+        try:
+            cached_data = redis_conn.get(cache_key)
+            if cached_data:
+                logger.info("Serving analytics metrics from Redis cache.")
+                return json.loads(cached_data)
+        except Exception as ce:
+            logger.warning(f"Failed to read from Redis cache: {ce}")
+
     try:
         # 1. Base query counts
         total_logs = db.query(models.InferenceLog).count()
@@ -131,7 +143,7 @@ def get_metrics(db: Session = Depends(get_db)):
                 "error": err.error_message or "Unknown execution error."
             })
 
-        return {
+        metrics_payload = {
             "summary": {
                 "total_requests": total_logs,
                 "success_rate": round(success_rate, 2),
@@ -145,6 +157,16 @@ def get_metrics(db: Session = Depends(get_db)):
             "throughput_timeline": throughput_timeline,
             "recent_errors": recent_errors
         }
+
+        # Cache compiled metrics in Redis with a 10s TTL
+        if redis_conn is not None:
+            try:
+                redis_conn.setex(cache_key, 10, json.dumps(metrics_payload))
+                logger.info("Successfully cached compiled analytics metrics in Redis (TTL=10s).")
+            except Exception as ce:
+                logger.warning(f"Failed to cache compiled metrics to Redis: {ce}")
+
+        return metrics_payload
 
     except Exception as e:
         logger.error(f"Failed to generate telemetry dashboard metrics: {e}")

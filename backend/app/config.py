@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     # Redactor settings
     REDACT_PII: bool = True
 
+    # Redis settings
+    REDIS_HOST: str = "localhost"
+    REDIS_PORT: int = 6379
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

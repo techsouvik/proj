@@ -32,11 +32,46 @@ services:
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - INGEST_URL=http://localhost:8000/api/logs/ingest
       - REDACT_PII=True
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
 
-  # 3. Next.js Frontend (Chat application & metrics charts dashboard)
+  # 3. Redis Task Broker
+  redis:
+    image: redis:7-alpine
+    container_name: aether_redis
+    restart: always
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # 4. Decoupled RQ Background Worker (processes telemetry queue)
+  worker:
+    build: ./backend
+    container_name: aether_worker
+    restart: always
+    command: rq worker telemetry --url redis://redis:6379
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/aether_telemetry
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - REDACT_PII=True
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # 5. Next.js Frontend (Chat application & metrics charts dashboard)
   frontend:
     build: ./frontend
     container_name: aether_frontend
@@ -51,3 +86,4 @@ services:
 volumes:
   pgdata:
     driver: local
+

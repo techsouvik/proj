@@ -26,6 +26,7 @@ class ConversationCreate(ConversationBase):
 
 class ConversationResponse(ConversationBase):
     id: str
+    user_id: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     messages: List[MessageResponse] = []
@@ -49,6 +50,26 @@ class IngestLogPayload(BaseModel):
     raw_input: str = Field(..., description="Prompt string sent to the model (PII redacted)")
     raw_output: str = Field(..., description="Response output string returned by the model (PII redacted)")
     metadata: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Additional context keys")
+
+
+class InferenceLogResponse(BaseModel):
+    id: str
+    conversation_id: str
+    message_id: Optional[str] = None
+    model: str
+    provider: str
+    latency_ms: float
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    status: str
+    error_message: Optional[str] = None
+    raw_input: str
+    raw_output: str
+    timestamp: datetime
+
+    class Config:
+        from_attributes = True
 
 
 # --- Chat Request Schema ---

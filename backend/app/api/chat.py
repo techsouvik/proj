@@ -2,7 +2,8 @@ import time
 import json
 import logging
 import asyncio
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException, Request, status, Header
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from app.database import get_db
@@ -45,15 +46,27 @@ def get_mock_reply(turn_count: int) -> str:
 # --- Conversation Endpoints ---
 
 @router.get("/conversations", response_model=list[schemas.ConversationResponse])
-def list_conversations(db: Session = Depends(get_db)):
-    """Lists all conversation sessions ordered by updated time."""
-    return db.query(models.Conversation).order_by(models.Conversation.updated_at.desc()).all()
+def list_conversations(
+    db: Session = Depends(get_db),
+    x_session_id: Optional[str] = Header(None)
+):
+    """Lists all conversation sessions belonging to the session owner, ordered by updated time."""
+    query = db.query(models.Conversation)
+    if x_session_id:
+        query = query.filter(models.Conversation.user_id == x_session_id)
+    else:
+        query = query.filter(models.Conversation.user_id == None)
+    return query.order_by(models.Conversation.updated_at.desc()).all()
 
 
 @router.post("/conversations", response_model=schemas.ConversationResponse, status_code=status.HTTP_201_CREATED)
-def create_conversation(payload: schemas.ConversationCreate, db: Session = Depends(get_db)):
-    """Creates a new empty chat session."""
-    conversation = models.Conversation(title=payload.title)
+def create_conversation(
+    payload: schemas.ConversationCreate, 
+    db: Session = Depends(get_db),
+    x_session_id: Optional[str] = Header(None)
+):
+    """Creates a new empty chat session owned by the session owner."""
+    conversation = models.Conversation(title=payload.title, user_id=x_session_id)
     db.add(conversation)
     db.commit()
     db.refresh(conversation)
@@ -61,20 +74,38 @@ def create_conversation(payload: schemas.ConversationCreate, db: Session = Depen
 
 
 @router.get("/conversations/{id}", response_model=schemas.ConversationResponse)
-def get_conversation(id: str, db: Session = Depends(get_db)):
-    """Retrieves a single conversation with its message history."""
-    conversation = db.query(models.Conversation).filter(models.Conversation.id == id).first()
+def get_conversation(
+    id: str, 
+    db: Session = Depends(get_db),
+    x_session_id: Optional[str] = Header(None)
+):
+    """Retrieves a single conversation belonging to the session owner with its message history."""
+    query = db.query(models.Conversation).filter(models.Conversation.id == id)
+    if x_session_id:
+        query = query.filter(models.Conversation.user_id == x_session_id)
+    else:
+        query = query.filter(models.Conversation.user_id == None)
+    conversation = query.first()
     if not conversation:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+        raise HTTPException(status_code=404, detail="Conversation not found or access denied")
     return conversation
 
 
 @router.delete("/conversations/{id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_conversation(id: str, db: Session = Depends(get_db)):
-    """Deletes a conversation and all its cascading messages & logs."""
-    conversation = db.query(models.Conversation).filter(models.Conversation.id == id).first()
+def delete_conversation(
+    id: str, 
+    db: Session = Depends(get_db),
+    x_session_id: Optional[str] = Header(None)
+):
+    """Deletes a conversation belonging to the session owner and all its cascading messages & logs."""
+    query = db.query(models.Conversation).filter(models.Conversation.id == id)
+    if x_session_id:
+        query = query.filter(models.Conversation.user_id == x_session_id)
+    else:
+        query = query.filter(models.Conversation.user_id == None)
+    conversation = query.first()
     if not conversation:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+        raise HTTPException(status_code=404, detail="Conversation not found or access denied")
     db.delete(conversation)
     db.commit()
     return None
@@ -86,7 +117,8 @@ def delete_conversation(id: str, db: Session = Depends(get_db)):
 async def stream_chat(
     request: Request,
     payload: schemas.ChatRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    x_session_id: Optional[str] = Header(None)
 ):
     """
     Primary endpoint for streaming multi-turn chat interactions.
@@ -97,15 +129,23 @@ async def stream_chat(
 
     # 1. Initialize or load Conversation
     if not conversation_id:
-        conversation = models.Conversation(title=payload.message[:30] + "..." if len(payload.message) > 30 else payload.message)
+        conversation = models.Conversation(
+            title=payload.message[:30] + "..." if len(payload.message) > 30 else payload.message,
+            user_id=x_session_id
+        )
         db.add(conversation)
         db.commit()
         db.refresh(conversation)
         conversation_id = conversation.id
     else:
-        conversation = db.query(models.Conversation).filter(models.Conversation.id == conversation_id).first()
+        query = db.query(models.Conversation).filter(models.Conversation.id == conversation_id)
+        if x_session_id:
+            query = query.filter(models.Conversation.user_id == x_session_id)
+        else:
+            query = query.filter(models.Conversation.user_id == None)
+        conversation = query.first()
         if not conversation:
-            raise HTTPException(status_code=404, detail="Conversation not found")
+            raise HTTPException(status_code=404, detail="Conversation not found or access denied")
         # Update conversation timestamp
         conversation.updated_at = models.func.now()
         db.commit()
@@ -130,10 +170,6 @@ async def stream_chat(
     for msg in past_messages[:-1]:
         history_list.append({"role": msg.role, "content": msg.content})
 
-    # Prepare current prompt & token estimates
-    prompt = payload.message
-    prompt_tokens = len(prompt) // 4  # Standard token count approximation (4 chars = 1 token)
-
     # Resolve active model & provider
     # Fallback to Mock if key is missing or mock selected explicitly
     use_live_gemini = (
@@ -144,6 +180,26 @@ async def stream_chat(
     
     active_provider = "google" if use_live_gemini else "mock"
     active_model = payload.model if use_live_gemini else f"mock-{payload.model}"
+
+    # Prepare current prompt & token estimates
+    prompt = payload.message
+    prompt_tokens = len(prompt) // 4  # Standard token count approximation (4 chars = 1 token)
+
+    if use_live_gemini:
+        try:
+            # Build full content array (history + current prompt) for accurate token counting
+            temp_contents = []
+            for h in history_list:
+                gemini_role = "model" if h["role"] == "assistant" else "user"
+                temp_contents.append({"role": gemini_role, "parts": [{"text": h["content"]}]})
+            temp_contents.append({"role": "user", "parts": [{"text": prompt}]})
+
+            model_instance = genai.GenerativeModel(active_model)
+            token_count_resp = model_instance.count_tokens(temp_contents)
+            prompt_tokens = token_count_resp.total_tokens
+            logger.info(f"Gemini API counted exact prompt context tokens: {prompt_tokens}")
+        except Exception as token_err:
+            logger.warning(f"Failed to count prompt tokens with Gemini API: {token_err}. Using fallback approximation.")
 
     # Allocate placeholder assistant message in the DB
     assistant_message = models.Message(
@@ -236,6 +292,15 @@ async def stream_chat(
             # End timer & record latency
             latency_ms = (time.time() - start_time) * 1000
             completion_tokens = len(full_response) // 4
+            
+            if use_live_gemini and full_response:
+                try:
+                    model_instance = genai.GenerativeModel(active_model)
+                    completion_tokens_resp = model_instance.count_tokens(full_response)
+                    completion_tokens = completion_tokens_resp.total_tokens
+                    logger.info(f"Gemini API counted exact completion tokens: {completion_tokens}")
+                except Exception as token_err:
+                    logger.warning(f"Failed to count completion tokens with Gemini API: {token_err}. Using fallback approximation.")
 
             # Complete assistant message content update in DB (only if we produced text)
             if full_response:
