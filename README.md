@@ -7,11 +7,15 @@ Aether is a premium, lightweight, highly performant, and visual-stunning fullsta
 ## 🚀 Key Features
 
 * **Multi-Turn Chatbot Interface**: Modern, dark-mode first, glassmorphic UI utilizing standard SSE (Server-Sent Events) streaming for realistic, lightning-fast generation.
+* **Session-Level Partitioning**: Multi-tenant isolation using unique browser session tracking. Sessions generate a randomized UUID saved to browser `localStorage` and transmit it via `X-Session-ID` request headers, keeping user conversation threads separated. Includes backwards-compatible legacyship for null sessions.
 * **Stream Cancellation Support**: Allows users to stop/cancel ongoing model generation instantly. The FastAPI server detects client-side disconnection, halts execution, and logs a `"cancelled"` telemetry status.
+* **Enterprise-Grade Token Calculations**: Uses Gemini's native `.count_tokens()` API to accurately calculate prompt context and completion token sizes, with a seamless, silent fallback to character length estimation if running in mock/demo mode.
 * **Lightweight Telemetry Logging SDK**: Built as a decoupled, asynchronous module (`backend/sdk`) that intercepts prompt requests and model responses, times execution, evaluates token usage, and sends telemetry logs block-free.
 * **PII Redaction Engine**: Fully integrated within the SDK wrapper to redact emails, phone numbers, credit card numbers, Social Security Numbers (SSNs), and API keys before they are ingested or saved to the database.
+* **Distributed Task Queue Broker**: Offloads heavy transactional database writes to an asynchronous task queue managed by Redis and Redis Queue (RQ), maintaining low API response latency under high load. Seamlessly falls back to local in-process `BackgroundTasks` if Redis is offline.
+* **Active Analytics Caching**: Optimizes the OLAP dashboard path by caching compiled metrics in Redis under a fast 10-second TTL (Time-To-Live), protecting the relational database from frequent UI poll refresh requests.
 * **Operational Observability Dashboard**: Beautiful, responsive analytics panel showing cumulative inferences, success rates, average latencies, token volumes, model breakdowns, and recent error audit feeds. Uses **custom interactive SVG vector curves** for graphs to keep compile times ultra-low and animations butter-smooth.
-* **Docker Compose One-Command Setup**: Orchestrates an isolated network containing a PostgreSQL storage instance, a Python FastAPI server, and a Next.js client.
+* **Docker Compose One-Command Setup**: Orchestrates an isolated network containing PostgreSQL storage, Redis broker, background RQ worker, FastAPI server, and Next.js client.
 * **Seamless Local Fallback**: Gracefully falls back to SQLite for local development (no databases setup required) and mock-streams realistic AI generations if no Gemini API key is configured.
 
 ---
@@ -68,6 +72,7 @@ We utilize a robust relational database schema designed using SQLAlchemy, suppor
 │          conversations          │
 ├─────────────────────────────────┤
 │ id: String(36) [PK]             │ 1 ────┐
+│ user_id: String(100) [Index]    │       │
 │ title: String(255)              │       │ Has Many
 │ created_at: DateTime            │       │
 │ updated_at: DateTime            │       │
@@ -97,6 +102,7 @@ We utilize a robust relational database schema designed using SQLAlchemy, suppor
 1. **Uncoupled Message & Inference Logging**: Not every message in our database triggers an LLM call (e.g., user questions, or system events). Therefore, `messages` and `inference_logs` are separate entities. `inference_logs` holds a nullable foreign key `message_id` pointing directly to the assistant's generated output, enabling deep granular auditing of specific LLM call outputs.
 2. **Cascading Deletions**: Conversations, messages, and telemetry data are structured under foreign key constraints with `ondelete="CASCADE"`. If a conversation is cleared in the UI, all of its nested message histories and logs are automatically and safely deleted, avoiding database bloat.
 3. **Redacted Storage**: To fulfill enterprise compliance, `raw_input` and `raw_output` columns store redacted text directly, guaranteeing that raw PII is never stored permanently on disks.
+4. **Session-Level Partitioning**: Adding an indexed `user_id` column to conversations isolates threads per browser/tab session. This prevents cross-tenant thread exposure while keeping database schemas clean and compatible with unassigned legacy conversations (where `user_id` is null).
 
 ---
 
@@ -121,6 +127,12 @@ Ensure you have Docker and Docker Compose installed.
    ```bash
    docker compose up --build
    ```
+   *This boots up the following services on an isolated bridge network:*
+   * 🗄️ **`aether_db`**: PostgreSQL 15 container for durable metadata & telemetry logs storage.
+   * ⚡ **`aether_redis`**: Redis 7 container serving as the asynchronous task broker and analytics cache.
+   * ⚙️ **`aether_backend`**: FastAPI application server processing stream chat SSE and SDK ingestion requests.
+   * 👷 **`aether_worker`**: Python RQ (Redis Queue) background worker that handles safe database write operations.
+   * 🎨 **`aether_frontend`**: Next.js client hosting our visual telemetry dashboards and interactive chatbot.
 4. **Access the Applications**:
    * **Frontend Client (Next.js)**: [http://localhost:3000](http://localhost:3000)
    * **Backend REST API (FastAPI)**: [http://localhost:8000](http://localhost:8000)
@@ -153,6 +165,15 @@ npm install
 npm run dev
 ```
 *The client will start hot-reloading on [http://localhost:3000](http://localhost:3000).*
+
+#### 3. Running Automated Unit Tests
+Aether includes a robust automated test suite in `backend/test_pipeline.py` validating PII redaction patterns, SQLAlchemy cascading relationship delete-orphans, and multi-tenant session isolation queries.
+
+```bash
+cd backend
+source venv/bin/activate
+python test_pipeline.py
+```
 
 ---
 
